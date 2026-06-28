@@ -1,23 +1,23 @@
+require('dotenv').config();
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const cors = require("cors")
 const path = require("path")
+const { spawn } = require("child_process")
 const app = express();
 const PORT = 3000;
-
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: 'Rate limit reached' }
-});
-app.use(limiter);
-
-require('dotenv').config();
 
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN
 }));
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1000,
+  message: { error: 'Rate limit reached' }
+});
+app.use(limiter);
 
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
@@ -49,6 +49,53 @@ app.get('/day/:id', (req, res) => {
 
 app.get('/hello', (req, res) => {
   res.json({ message: 'Hello, World!' });
+});
+
+const PRIME_ALGORITHMS = [
+  { name: 'trial-division', image: 'prime-trial-division' },
+  { name: 'sieve', image: 'prime-sieve' },
+  { name: 'miller-rabin', image: 'prime-miller-rabin' },
+];
+
+app.get('/primes/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const processes = [];
+
+  PRIME_ALGORITHMS.forEach(({ name, image }) => {
+    const proc = spawn('docker', ['run', '--rm', image], { shell: true });
+    processes.push(proc);
+
+    let buffer = '';
+    proc.stdout.on('data', (data) => {
+      buffer += data.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      lines.forEach(line => {
+        const value = parseInt(line.trim(), 10);
+        if (!isNaN(value)) {
+          res.write(`data: ${JSON.stringify({ algorithm: name, value })}\n\n`);
+        }
+      });
+    });
+
+    proc.stderr.on('data', (data) => {
+      res.write(`data: ${JSON.stringify({ error: `[${name}] ${data.toString().trim()}` })}\n\n`);
+    });
+
+    proc.on('error', (err) => {
+      res.write(`data: ${JSON.stringify({ error: `Failed to start ${name}: ${err.message}` })}\n\n`);
+    });
+  });
+
+  req.on('close', () => {
+    processes.forEach(proc => {
+      try { proc.kill('SIGTERM'); } catch (_) {}
+    });
+  });
 });
 
 app.listen(PORT, () => {
